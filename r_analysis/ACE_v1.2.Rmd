@@ -1,0 +1,176 @@
+---
+title: "Beetle ACE Analysis"
+output: html_notebook
+---
+
+# Plot the tree with node labels
+
+```{r}
+library(ape)
+
+figtree.tre <- read.tree("figtree.tre")
+
+plot(figtree.tre, no.margin=TRUE, edge.width=2, lab4ut="axial", label.offset = 3)
+tiplabels()
+nodelabels()
+```
+
+# Compute ACE
+
+```{r}
+library(phytools)
+library(ape)
+library(raster)
+
+## INPUT FILES
+file_list <- list.files('./Data/mean/', full.names=TRUE)
+data_filename <- extension(basename(file_list), '.csv')
+
+ACE_outpath <- './Results/'
+ACE_outfiles <- file.path(ACE_outpath, gsub("Data","ACE",data_filename))
+
+tree_file = "./figtree.tre"
+species_tree<-read.tree(tree_file)
+
+## Loop through each file in Data directory
+for (i in 1:length(file_list)){
+  mydata<-read.csv(file_list[i])
+  rownames(mydata) <- mydata$species
+
+  ACE_column_names <- c("OrthoID", "G_corn", "T_brev", "T_conf", "T_cast", "T_frem", 
+                    "A_MRCA", "B_Tbrev_anc", "C_Tconf_anc", "D_Tfree-Tcast_anc")
+
+  write.table(t(ACE_column_names), file = ACE_outfiles[i], sep=",", row.names = FALSE, col.names = FALSE)
+  
+## Ancestral Character Estimation (ACE)
+   for (x in 2:ncol(mydata)){
+    tips <- apply(mydata[,x, drop=FALSE], 1, as.numeric)
+    ACE<-unname(fastAnc(species_tree,tips))
+    
+    write.table(t(c(tips,ACE)), 
+                file= ACE_outfiles[i],
+                append=TRUE, 
+                sep=",",
+                row.names = colnames(mydata[x]),
+                col.names = FALSE)
+  }
+}
+```
+
+# Compute Pagel (w/ se)
+
+```{r}
+library(phytools)
+library(ape)
+
+## INPUT FILES
+file_list <- list.files("./Data/mean/", full.names = TRUE)
+data_filename <- sub("\\.csv$", "", basename(file_list))
+sem_file_list <- list.files("./Data/sem/", full.names = TRUE)
+
+PAGEL_outpath <- "./Results/"
+if (!dir.exists(PAGEL_outpath)) dir.create(PAGEL_outpath, recursive = TRUE)
+
+PAGEL_outfiles <- file.path(PAGEL_outpath, paste0(data_filename, "_PAGEL.csv"))
+
+tree_file <- "./figtree.tre"
+species_tree <- read.tree(tree_file)
+
+## Guard against zero/negative branch lengths
+if (!is.null(species_tree$edge.length)) {
+  species_tree$edge.length[species_tree$edge.length <= 0] <- 1e-6
+}
+
+for (i in seq_along(file_list)) {
+  mydata <- read.csv(file_list[i], stringsAsFactors = FALSE)
+  rownames(mydata) <- mydata$species
+
+  sem <- read.csv(sem_file_list[i], stringsAsFactors = FALSE)
+  rownames(sem) <- sem$species
+
+  ## Keep only shared species
+  shared_species <- Reduce(
+    intersect,
+    list(species_tree$tip.label, rownames(mydata), rownames(sem))
+  )
+
+  if (length(shared_species) < 3) {
+    warning(sprintf("Skipping %s: fewer than 3 shared species.", file_list[i]))
+    next
+  }
+
+  tree_sub <- drop.tip(species_tree, setdiff(species_tree$tip.label, shared_species))
+  mydata <- mydata[tree_sub$tip.label, , drop = FALSE]
+  sem <- sem[tree_sub$tip.label, , drop = FALSE]
+
+  ## Find shared trait columns, excluding the species column
+  trait_cols <- intersect(colnames(mydata), colnames(sem))
+  trait_cols <- setdiff(trait_cols, "species")
+
+  if (length(trait_cols) == 0) {
+    warning(sprintf("Skipping %s: no shared trait columns between mean and sem files.", file_list[i]))
+    next
+  }
+
+  ## Output header
+  write.table(
+    t(c("OrthoID", "Lambda", "P")),
+    file = PAGEL_outfiles[i],
+    sep = ",",
+    row.names = FALSE,
+    col.names = FALSE,
+    quote = FALSE
+  )
+
+  ## Calculate Pagel's lambda for each shared trait
+  for (trait_name in trait_cols) {
+    tips <- as.numeric(mydata[[trait_name]])
+    se <- as.numeric(sem[[trait_name]])
+
+    names(tips) <- rownames(mydata)
+    names(se) <- rownames(sem)
+
+    if (any(is.na(tips)) || any(is.na(se)) || length(unique(tips)) < 2 || any(se < 0)) {
+      write.table(
+        t(c(NA, NA)),
+        file = PAGEL_outfiles[i],
+        append = TRUE,
+        sep = ",",
+        row.names = trait_name,
+        col.names = FALSE,
+        quote = FALSE
+      )
+      next
+    }
+
+    se[se == 0] <- 1e-8
+
+    pagel <- try(
+      phylosig(tree_sub, tips, se = se, method = "lambda", test = TRUE),
+      silent = TRUE
+    )
+
+    if (inherits(pagel, "try-error")) {
+      write.table(
+        t(c(NA, NA)),
+        file = PAGEL_outfiles[i],
+        append = TRUE,
+        sep = ",",
+        row.names = trait_name,
+        col.names = FALSE,
+        quote = FALSE
+      )
+    } else {
+      write.table(
+        t(c(pagel$lambda, pagel$P)),
+        file = PAGEL_outfiles[i],
+        append = TRUE,
+        sep = ",",
+        row.names = trait_name,
+        col.names = FALSE,
+        quote = FALSE
+      )
+    }
+  }
+}
+```
